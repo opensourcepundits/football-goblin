@@ -209,9 +209,13 @@ The core architectural goal is **Zero External Lookups During Play**. All static
 
 Build the data layer fully before touching the PWA — get the knowledge base solid and validated first, UI last.
 
-### Phase 1: Static metadata store (`teams` + `players`)
-- Stand up Firestore, define the two collections, seed with real data for a handful of teams/players (one fixture's worth, not the whole league, to start).
-- Write the 24-hour batch recompute job for season stats early, even if run manually at first — this confirms the schema supports the update path before anything depends on it.
+### Phase 1: Static metadata store (`teams` + `players`) — scoped to 48 World Cup 2026 teams
+
+1. **Lock the team list.** All 48 are already finalized (hosts Canada/Mexico/USA + 45 qualifiers across UEFA, CONMEBOL, CAF, AFC, Concacaf, OFC). Hardcode this list rather than discovering it dynamically — it won't change mid-tournament.
+2. **Seed `teams` (48 documents)** using the V1 schema in Section 9. Source: FIFA.com for group/ranking data, Wikipedia/Wikidata for historical World Cup records per country.
+3. **Seed `players` (48 × 26 ≈ 1,248 documents)** using the V1 schema in Section 9. Source: ESPN's finalized squad lists (locked June 2) for the base roster; Transfermarkt for `club_context.pre_tournament_form` and `injury_status.injury_history`.
+4. **One-time pre-tournament form + injury pull.** Since `pre_tournament_form` is a snapshot (not live), this is a single batch pull per player, not a recurring job — run it once, close to kickoff, and you're done for V1.
+5. **Validation pass.** Spot-check 2-3 teams, including a debutant nation (e.g., Cape Verde, Curaçao, Jordan, or Uzbekistan), since smaller federations are more likely to have data gaps in third-party sources than established teams.
 
 ### Phase 2: Vector relationship index ("the knowledge base")
 - Pick an embedding model, build the ingestion pipeline: raw trivia/narrative text → embeddings → stored vectors with `entities` and `context_tags`.
@@ -232,7 +236,8 @@ Build the data layer fully before touching the PWA — get the knowledge base so
 ### For the static metadata store (`teams`, `players`, historical records)
 
 - **Wikipedia / Wikidata** — solid for club founding dates, venue capacities, historical records (e.g., biggest wins, unbeaten runs), and player biographical data (birthdate, nationality). Wikidata's structured query service (SPARQL) is easier to bulk-pull from than scraping prose pages.
-- **Transfermarkt** — strong for squad lists, player market values, contract/injury history, and transfer records. No official API, but community-maintained scrapers exist (e.g., `transfermarkt-scraper`, `worldfootballR` for R users).
+- **Transfermarkt** — strong for squad lists, player market values, contract/injury history, and transfer records. No official API, but community-maintained scrapers exist (e.g., `transfermarkt-scraper`, `worldfootballR` for R users). This is also the most reliable single source for `injury_status.injury_history` — it maintains a per-player injury log with dates and matches missed.
+- **ESPN's World Cup injury tracker** — a curated, tournament-specific source for which players are managing fitness concerns heading into or during the World Cup; useful as a cross-check against Transfermarkt's more granular club-level injury log.
 - **Official club/league sites** — most top-flight clubs and leagues (Premier League, La Liga, etc.) publish official squad and fixture data; useful as a ground-truth cross-check against third-party providers.
 - **football-data.org** — free tier covering ~12 major leagues, good for bootstrapping seasonal stats without a paid plan.
 - **Understat** — free xG/xA data, but limited to six leagues; useful if your `current_season_metrics.expected_goals_xG` fields need a free historical baseline.
@@ -251,3 +256,114 @@ Build the data layer fully before touching the PWA — get the knowledge base so
 - **Sportradar / Opta** — enterprise-grade, official league partnerships, most reliable for production-scale apps, but priced and contracted accordingly — worth evaluating once the prototype proves out the architecture.
 
 **Practical note:** since most of this data (standings, season stats, historical records) doesn't change minute to minute, cache aggressively and only hit the live endpoint for the truly live fields (`clock`, `score`, in-match events) — this keeps you within free-tier rate limits during development.
+
+---
+
+## 9. V1 Schema: World Cup 2026 (National Team Scope)
+
+V1 is scoped to only the 48 teams currently competing in the 2026 FIFA World Cup. This changes the `teams` and `players` shapes from the original club-oriented examples in Section 1, since national teams don't have a club "season," a home venue in the same sense, or club-only milestone tracking. Use the schemas below as the V1 source of truth in place of Section 1's examples.
+
+### Collection: `teams` (V1 — national teams)
+
+```json
+// Path: /teams/{team_id}
+{
+  "team_id": "tm_por",
+  "name": "Portugal",
+  "short_name": "POR",
+  "confederation": "UEFA",
+  "group": "F",
+  "fifa_ranking": 6,
+  "logo_url": "https://storage.googleapis.com/match-assistant-assets/flags/por.png",
+  "tournament_stats": {
+    "played": 1,
+    "won": 1,
+    "drawn": 0,
+    "lost": 0,
+    "goals_scored": 2,
+    "goals_conceded": 0,
+    "clean_sheets": 1
+  },
+  "historical_records": {
+    "best_world_cup_finish": "3rd place (1966, 2006)",
+    "appearances_total": 8,
+    "biggest_world_cup_win": "7-0 vs North Korea (1966)"
+  }
+}
+```
+
+### Collection: `players` (V1 — national team squad, with club form + injury tracking)
+
+**Role addition:** beyond biographical and tournament data, each player document now carries (1) **pre-tournament club form** — what they were doing for their club in the weeks/months leading into the World Cup, used to talk about a player's form heading into a match — and (2) **injury status**, both current and historical, so commentary can reference fitness concerns or recent return-from-injury context.
+
+```json
+// Path: /players/{player_id}
+{
+  "player_id": "pl_bruno_08",
+  "team_id": "tm_por",
+  "display_name": "Bruno Fernandes",
+  "full_name": "Bruno Miguel Borges Fernandes",
+  "squad_number": 8,
+  "position": "Midfielder",
+  "birth_date": "1994-09-08",
+  "preferred_foot": "Right",
+  "height_cm": 179,
+
+  "club_context": {
+    "current_club": "Manchester United",
+    "league": "Premier League",
+    "pre_tournament_form": {
+      "period_covered": "2025-26 season, through 2026-05-25",
+      "appearances": 34,
+      "goals": 9,
+      "assists": 13,
+      "minutes_played": 2890,
+      "passing_accuracy_pct": 83.1,
+      "form_note": "Started Man United's final 12 league matches before the World Cup break"
+    }
+  },
+
+  "injury_status": {
+    "is_currently_injured": false,
+    "current_injury": null,
+    "fitness_note": "Returned to full training 2026-05-30, no minutes restriction",
+    "injury_history": [
+      {
+        "injury_type": "Hamstring strain",
+        "date_occurred": "2026-03-10",
+        "date_returned": "2026-04-02",
+        "days_out": 23,
+        "club_matches_missed": 5
+      },
+      {
+        "injury_type": "Ankle knock",
+        "date_occurred": "2025-11-18",
+        "date_returned": "2025-11-25",
+        "days_out": 7,
+        "club_matches_missed": 1
+      }
+    ]
+  },
+
+  "tournament_metrics": {
+    "appearances": 1,
+    "minutes_played": 90,
+    "goals": 1,
+    "assists": 0,
+    "yellow_cards": 0,
+    "red_cards": 0
+  },
+
+  "milestone_alerts": {
+    "world_cup_caps_total": 1,
+    "world_cup_goals_total": 1,
+    "country_world_cup_goals_record": 9,
+    "international_caps_total": 92
+  }
+}
+```
+
+**Field notes:**
+- `injury_status.current_injury` is `null` when fit; when injured, populate with the same shape as an `injury_history` entry plus an `expected_return_date`. This lets the commentator layer flag "playing through fitness concerns" if a player took the pitch shortly after `date_returned`.
+- `club_context.pre_tournament_form` is a snapshot, not a live feed — refresh it once before the tournament starts (it doesn't need in-tournament updates, since club seasons are over once the World Cup begins for most leagues).
+- `injury_history` should be capped (e.g., last 3-5 entries) rather than a full career log, to keep documents small and queries fast.
